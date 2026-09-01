@@ -5,6 +5,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// TODO: error when notes is executed without config or dir
+// TODO: github sync
+
 /// Simple cli utility to sync notes from an encrypted git remote.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -23,8 +26,13 @@ fn main() {
 
     match args.command.as_deref() {
         Some("setup") => setup(&mut config, &config_file_path).expect("Failed to set up"),
-        _ => {}
+        _ => edit(&config.notes_dir).expect("Failed to edit notes"),
     }
+}
+
+fn edit(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = Command::new("nvim").arg(path).status()?;
+    Ok(())
 }
 
 fn setup(config: &mut Config, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -47,9 +55,28 @@ fn setup(config: &mut Config, path: &Path) -> Result<(), Box<dyn std::error::Err
 
     config.notes_dir = expanded_dir;
 
+    let mut remote = String::new();
+
+    print!("Git remote: ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut remote)?;
+
+    let trimmed = remote.trim();
+
+    let cryptremote = format!("gcrypt::{}", trimmed);
+
     let _ = Command::new("git")
         .arg("init")
         .arg(&config.notes_dir)
+        .status()?;
+
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("remote")
+        .arg("add")
+        .arg("cryptremote")
+        .arg(&cryptremote)
         .status()?;
 
     config.save(path)?;
