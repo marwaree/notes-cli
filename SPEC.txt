@@ -1,6 +1,7 @@
 NOTES CLI
 
 - git (add different ways to authenticate in the future) hide token when entering it
+- if editing offline, warn about it and schedule pull, merge and push for when online
 - editing with nvim
 - plain .md (maybe add other filetypes later such as latex or typst)
 - sync with remote (git pull --rebase at startup and commit when exiting editor)
@@ -25,31 +26,3 @@ FUNCTIONALITY:
 Searching Notes: Map a shortcut to Telescope targeting the tmpfs directory.
 
 Creating Notes: A simple Lua function mapped to a hotkey that asks for the path, creates the file, and injects the template.
-
-
-
-
-
-The Plaintext Guardrail (Pre-Push Hook)
-
-To satisfy Requirement 4 ("ensure plaintext is never pushed"), create a Git hook that intercepts every push and strictly verifies the destination URL.
-
-Create .git/hooks/pre-push and make it executable (chmod +x .git/hooks/pre-push):
-
-
-#!/bin/bash
-REMOTE_URL="$2"
-
-if [[ "$REMOTE_URL" != gcrypt::* ]]; then
-    echo "=========================================================="
-    echo "FATAL SECURITY ERROR: Remote URL is not encrypted!"
-    echo "Attempted to push to: $REMOTE_URL"
-    echo "Push aborted to protect plaintext notes."
-    echo "=========================================================="
-    exit 1
-fi
-
-exit 0
-
-
-If the gcrypt:: prefix is ever accidentally removed from your Git config, this script will immediately block the push.
