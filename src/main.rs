@@ -7,8 +7,11 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
-// TODO: Ask for branch during setup
-// TODO: github sync - check if EVERY remote url is gcrypt:: before pushing unless there is no remote (local repo)
+// FIX: editor doesnt start
+// TODO: add instructions to edit ~/.gnupg/gpg.conf to add use-agent, configure cache duration with
+// ~/.gnupg/gpg-agent.conf default-cache-ttl 28800 and x-cache-ttl 28800, run gpg-connect-agent reloadagent /bye
+// TODO: if using github tokens, add instructions to run git config --global credential.helper 'cache --timeout=28800'
+// TODO: create or import gpg key in setup
 // TODO: option for local repo on setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
 // TODO: add support for other editors
@@ -49,9 +52,10 @@ fn run(args: Args) -> Result<()> {
     }
 
     println!("Syncing notes repository...");
-    git_pull(&config).context("Failed during initial git pull")?;
+    git_pull(&config)?;
 
-    launch_editor(&config).context("Failed while running editor")?;
+    println!("Launching editor...");
+    launch_editor(&config)?;
 
     let message = commit_message_prompt()?;
 
@@ -61,28 +65,49 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn git_pull(config: &Config) -> Result<()> {
-    let status = Command::new("git")
+    let pull_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("pull")
         .arg("--rebase")
-        .status()?;
-    if !status.success() {
-        bail!("Failed to pull repository");
+        .status()
+        .context("Failed to execute git process")?;
+
+    if !pull_output.success() {
+        eprintln!("\x1b[1;33mWarning:\x1b[0m Failed to sync repository.",);
+        print!("Do you wish to continue? [y/N]: ");
+
+        let mut answer = String::new();
+
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut answer)?;
+
+        let answer = answer.trim().to_lowercase();
+
+        match answer.as_str() {
+            "yes" | "y" => return Ok(()),
+            _ => bail!("Operation aborted by user due to git pull failure"),
+        }
     }
+
     Ok(())
 }
 
 fn launch_editor(config: &Config) -> Result<()> {
-    let status = Command::new("nvim").arg(&config.notes_dir).status()?;
-    if !status.success() {
-        bail!("Neovim exited with an error");
+    let nvim_output = Command::new("nvim")
+        .arg(&config.notes_dir)
+        .output()
+        .context("Failed to execute nvim process")?;
+
+    if !nvim_output.status.success() {
+        let stderr = String::from_utf8_lossy(&nvim_output.stderr);
+        bail!("{}", stderr.trim());
     }
     Ok(())
 }
 
 fn commit_message_prompt() -> Result<String> {
-    print!("Commit message [press Enter for default, Esc to cancel]: ");
+    print!("Commit message [press Enter for default, Esc to cancel sync]: ");
     io::stdout().flush().context("Failed to flush stdout")?;
 
     let mut input = String::new();
@@ -129,114 +154,176 @@ fn commit_message_prompt() -> Result<String> {
 }
 
 fn git_commit_push(config: &Config, message: &str) -> Result<()> {
-    let status = Command::new("git")
+    let commit_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("commit")
         .arg("-m")
         .arg(format!("'{}'", message))
-        .status()?;
-    if !status.success() {
-        bail!("Failed to commit changes.\n\x1b[1;33mWarning:\x1b[0m Remote not synced.");
+        .output()
+        .context("Failed to execute git process")?;
+
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        bail!(
+            "Failed to commit changes: {}\n\x1b[1;33mWarning:\x1b[0m Remote not synced.",
+            stderr.trim()
+        );
     }
 
-    let status = Command::new("git")
+    match check_remote_encryption(&config) {
+        Ok(false) => {
+            bail!("Failed to push changes to remote(s): One or more remotes are not encrypted.")
+        }
+        Err(err) => {
+            bail!("Failed to check git remotes encrpytion: {err}")
+        }
+        Ok(true) => {}
+    };
+
+    let push_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("push")
-        .status()?;
-    if !status.success() {
-        bail!("Failed to push changes to remote.\n\x1b[1;33mWarning:\x1b[0m Remote not synced.");
+        .status()
+        .context("Failed to execute git process")?;
+
+    if !push_output.success() {
+        bail!("Failed to push changes to remote.\n\x1b[1;33mWarning:\x1b[0m Remote not synced.",);
     }
 
     Ok(())
 }
 
-fn setup(config: &mut Config, path: &Path) -> Result<()> {
-    let mut notes_dir = String::new();
-
-    print!("Notes directory [~/Notes]: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut notes_dir)?;
-
-    let trimmed = notes_dir.trim();
-
-    let chosen_path = if trimmed.is_empty() {
-        "~/Notes"
-    } else {
-        trimmed
-    };
-
-    let expanded_dir = shellexpand::tilde(chosen_path).to_string();
-
-    config.notes_dir = expanded_dir;
-
-    let mut remote = String::new();
-
-    print!("Git remote: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut remote)?;
-
-    let trimmed = remote.trim();
-
-    let cryptremote = format!("gcrypt::{}", trimmed);
-
-    let init_status = Command::new("git")
-        .arg("init")
+fn check_remote_encryption(config: &Config) -> Result<bool> {
+    let output = Command::new("git")
+        .arg("-C")
         .arg(&config.notes_dir)
-        .status()
-        .with_context(|| format!("Failed to execute 'git init' in {}", &config.notes_dir))?;
+        .args(["remote", "-v"])
+        .output()?;
 
-    if !init_status.success() {
-        bail!(
-            "'git init' failed to create repository at {}",
-            &config.notes_dir
-        );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        if let (Some(_name), Some(url)) = (parts.next(), parts.next()) {
+            if !url.starts_with("gcrypt::") {
+                return Ok(false);
+            }
+        }
     }
 
-    let _ = Command::new("git")
+    Ok(true)
+}
+
+fn setup(config: &mut Config, path: &Path) -> Result<()> {
+    print!("Notes directory [~/Notes]: ");
+    let mut input = String::new();
+
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+
+    let raw_path = match input.trim() {
+        "" => "~/Notes",
+        path => path,
+    };
+
+    config.notes_dir = shellexpand::tilde(raw_path).into_owned();
+
+    print!("Git branch [main]: ");
+    let mut input = String::new();
+
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+
+    let branch = match input.trim() {
+        "" => "main",
+        s => s,
+    };
+
+    print!("Git remote: ");
+    let mut input = String::new();
+
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut input)?;
+
+    let remote = input.trim();
+
+    let cryptremote = format!("gcrypt::{}", remote);
+
+    let init_output = Command::new("git")
+        .arg("init")
+        .arg(&config.notes_dir)
+        .output()
+        .context("Failed to execute git process")?;
+
+    if !init_output.status.success() {
+        let stderr = String::from_utf8_lossy(&init_output.stderr);
+        bail!("Failed to create repository: {}", stderr.trim());
+    }
+
+    let remote_add_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("remote")
         .arg("add")
         .arg("cryptremote")
         .arg(&cryptremote)
-        .status()
-        .with_context(|| {
-            format!(
-                "Failed add remote to repository: {}. Do you have git-remote-gcrypt installed?",
-                &config.notes_dir
-            )
-        });
+        .output()
+        .context("Failed to execute git process")?;
+
+    if !remote_add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&remote_add_output.stderr);
+        bail!("Failed to add remote to repository: {}", stderr.trim());
+    }
 
     // Initial commit
-    let commit_status = Command::new("git")
+    let commit_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("commit")
         .arg("--allow-empty")
         .arg("-m")
         .arg("initial commit")
-        .status()
-        .context("Failed to create initial commit")?;
+        .output()
+        .context("Failed to execute git process")?;
 
-    if !commit_status.success() {
-        bail!("Failed to create initial repository commit");
+    if !commit_output.status.success() {
+        let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        bail!(
+            "Failed to create initial repository commit: {}",
+            stderr.trim()
+        );
     }
 
+    let branch_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("branch")
+        .arg("-M")
+        .arg(&branch)
+        .output()
+        .context("Failed to execute git process")?;
+
+    if !branch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&branch_output.stderr);
+        bail!("Failed to change branch: {}", stderr.trim());
+    }
+
+    println!("Pushing initial commit. Please authenticate below:");
     // Initial push
-    let push_status = Command::new("git")
+    let push_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("push")
         .arg("-u")
         .arg("cryptremote")
-        .arg("main")
+        .arg(branch)
         .status()
-        .context("Failed initial push to cryptremote")?;
+        .context("Failed to execute git process")?;
 
-    if !push_status.success() {
-        bail!("Failed to push initial commit to remote repository");
+    if !push_output.success() {
+        bail!("Failed to push initial repository commit.",);
     }
 
     config.save(path)?;
