@@ -2,13 +2,16 @@ mod config;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use config::*;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+// TODO: Ask for branch during setup
 // TODO: github sync - check if EVERY remote url is gcrypt:: before pushing unless there is no remote (local repo)
 // TODO: option for local repo on setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
+// TODO: add support for other editors
 
 /// Simple cli utility to sync notes from an encrypted git remote.
 #[derive(Parser, Debug)]
@@ -45,24 +48,107 @@ fn run(args: Args) -> Result<()> {
         bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
     }
 
-    // println!("Syncing notes repository...");
-    // git_pull().context("Failed during initial git pull")?;
+    println!("Syncing notes repository...");
+    git_pull(&config).context("Failed during initial git pull")?;
 
-    println!("Opening Neovim...");
     launch_editor(&config).context("Failed while running editor")?;
 
-    // println!("Processing post-edit sync...");
-    // prompt_and_push().context("Failed during post-edit git sync")?;
+    let message = commit_message_prompt()?;
 
-    // println!("Notes synced successfully.");
+    println!("Pushing changes to notes repository...");
+    git_commit_push(&config, &message)?;
+    Ok(())
+}
+
+fn git_pull(config: &Config) -> Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("pull")
+        .arg("--rebase")
+        .status()?;
+    if !status.success() {
+        bail!("Failed to pull repository");
+    }
     Ok(())
 }
 
 fn launch_editor(config: &Config) -> Result<()> {
-    let nvim_status = Command::new("nvim").arg(&config.notes_dir).status()?;
-    if !nvim_status.success() {
+    let status = Command::new("nvim").arg(&config.notes_dir).status()?;
+    if !status.success() {
         bail!("Neovim exited with an error");
     }
+    Ok(())
+}
+
+fn commit_message_prompt() -> Result<String> {
+    print!("Commit message [press Enter for default, Esc to cancel]: ");
+    io::stdout().flush().context("Failed to flush stdout")?;
+
+    let mut input = String::new();
+
+    loop {
+        if let Event::Key(key_event) = event::read().context("Failed to read terminal event")? {
+            if key_event.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            match key_event.code {
+                KeyCode::Esc => {
+                    println!();
+                    bail!("Sync cancelled by user");
+                }
+
+                KeyCode::Enter => {
+                    println!();
+                    let trimmed = input.trim();
+                    if trimmed.is_empty() {
+                        return Ok("sync: update notes".to_string());
+                    } else {
+                        return Ok(trimmed.to_string());
+                    }
+                }
+
+                KeyCode::Backspace => {
+                    if input.pop().is_some() {
+                        print!("\x08 \x08");
+                        io::stdout().flush()?;
+                    }
+                }
+
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    print!("{c}");
+                    io::stdout().flush()?;
+                }
+
+                _ => {}
+            }
+        }
+    }
+}
+
+fn git_commit_push(config: &Config, message: &str) -> Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("commit")
+        .arg("-m")
+        .arg(format!("'{}'", message))
+        .status()?;
+    if !status.success() {
+        bail!("Failed to commit changes.\n\x1b[1;33mWarning:\x1b[0m Remote not synced.");
+    }
+
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("push")
+        .status()?;
+    if !status.success() {
+        bail!("Failed to push changes to remote.\n\x1b[1;33mWarning:\x1b[0m Remote not synced.");
+    }
+
     Ok(())
 }
 
@@ -122,6 +208,36 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
                 &config.notes_dir
             )
         });
+
+    // Initial commit
+    let commit_status = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("commit")
+        .arg("--allow-empty")
+        .arg("-m")
+        .arg("initial commit")
+        .status()
+        .context("Failed to create initial commit")?;
+
+    if !commit_status.success() {
+        bail!("Failed to create initial repository commit");
+    }
+
+    // Initial push
+    let push_status = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("push")
+        .arg("-u")
+        .arg("cryptremote")
+        .arg("main")
+        .status()
+        .context("Failed initial push to cryptremote")?;
+
+    if !push_status.success() {
+        bail!("Failed to push initial commit to remote repository");
+    }
 
     config.save(path)?;
     Ok(())

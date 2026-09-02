@@ -3,6 +3,7 @@ NOTES CLI
 - git (add different ways to authenticate in the future) hide token when entering it
 - if editing offline, warn about it and schedule pull, merge and push for when online
 - editing with nvim
+- option to select other editors in setup
 - plain .md (maybe add other filetypes later such as latex or typst)
 - sync with remote (git pull --rebase at startup and commit when exiting editor)
 - encryption: use git-remote-gcrypt for encryption without sacrificing git functionality.
