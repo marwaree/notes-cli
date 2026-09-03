@@ -1,6 +1,14 @@
 # notes-cli
 
-## Simple cli utility to sync notes from an encrypted git remote.
+## Simple cli utility to sync notes from an encrypted git remote
+
+### Requirements
+
+```sh
+yay -S git-remote-gcrypt
+```
+
+### Quickstart
 
 Setup encrypted git repository:
 
@@ -28,8 +36,32 @@ This will ask you for a commit message:
 notes-cli push
 ```
 
-## Requirements
+### Configuration
+
+It is recommended to cache git and gpg credentials to avoid having to enter them over and over.
+You can do this by editing the following files:
+
+#### ~/.gnupg/gpg.conf
+
+```conf
+use-agent
+```
+
+#### ~/.gnupg/gpg-agent.conf
+
+```conf
+default-cache-ttl 28800
+x-cache-ttl 28800
+```
+
+Then reload the agent to apply the new configuration:
 
 ```sh
-yay -S git-remote-gcrypt
+gpg-connect-agent reloadagent /bye
+```
+
+To do the same for git credentials, run the following command:
+
+```sh
+git config --global credential.helper 'cache --timeout=28800'
 ```

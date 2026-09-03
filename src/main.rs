@@ -7,9 +7,6 @@ use inquire::{Confirm, Text};
 use std::path::Path;
 use std::process::Command;
 
-// TODO: add instructions to edit ~/.gnupg/gpg.conf to add use-agent, configure cache duration with
-// ~/.gnupg/gpg-agent.conf default-cache-ttl 28800 and x-cache-ttl 28800, run gpg-connect-agent reloadagent /bye
-// TODO: if using github tokens, add instructions to run git config --global credential.helper 'cache --timeout=28800'
 // TODO: create or import gpg key in setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
 // TODO: add note tags, search by tag
