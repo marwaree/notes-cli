@@ -1,8 +1,6 @@
 # notes-cli
 
-Simple cli utility to sync notes from an encrypted git remote.
-
---
+## Simple cli utility to sync notes from an encrypted git remote.
 
 Setup encrypted git repository:
 
