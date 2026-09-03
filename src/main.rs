@@ -1,26 +1,31 @@
 mod config;
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use config::*;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use std::io::{self, Write};
+use inquire::validator::Validation;
+use inquire::{Confirm, Text};
 use std::path::Path;
 use std::process::Command;
 
-// FIX: editor doesnt start
 // TODO: add instructions to edit ~/.gnupg/gpg.conf to add use-agent, configure cache duration with
 // ~/.gnupg/gpg-agent.conf default-cache-ttl 28800 and x-cache-ttl 28800, run gpg-connect-agent reloadagent /bye
 // TODO: if using github tokens, add instructions to run git config --global credential.helper 'cache --timeout=28800'
 // TODO: create or import gpg key in setup
-// TODO: option for local repo on setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
-// TODO: add support for other editors
+// TODO: add note tags, search by tag
 
 /// Simple cli utility to sync notes from an encrypted git remote.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    command: Option<String>,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Initialize the encrypted notes repository
+    Setup,
 }
 
 fn main() {
@@ -38,54 +43,89 @@ fn run(args: Args) -> Result<()> {
     let config_file_path = os_config_dir.join("notes-cli").join("config.toml");
     let mut config = Config::load_or_create(&config_file_path)?;
 
-    match args.command.as_deref() {
-        Some("setup") => {
+    match args.command {
+        Some(Commands::Setup) => {
             setup(&mut config, &config_file_path)?;
             return Ok(());
         }
         _ => {}
     }
-
-    let git_path = format!("{}/.git", config.notes_dir);
-    if !Path::new(&git_path).is_dir() {
+    let git_path = Path::new(&config.notes_dir).join(".git");
+    if !git_path.is_dir() {
         bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
     }
 
     println!("Syncing notes repository...");
     git_pull(&config)?;
 
-    println!("Launching editor...");
     launch_editor(&config)?;
 
-    let message = commit_message_prompt()?;
+    let message = get_commit_message()?;
 
-    println!("Pushing changes to notes repository...");
-    git_commit_push(&config, &message)?;
+    let push_confirmed = confirm_push()?;
+
+    if push_confirmed {
+        git_sync(&config, &message)?;
+    } else {
+        bail!("Push cancelled by user\n\x1b[1;33mWarning:\x1b[0m Remote is not synced.");
+    }
+
     Ok(())
 }
 
 fn git_pull(config: &Config) -> Result<()> {
-    let pull_output = Command::new("git")
+    let fetch_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
-        .arg("pull")
-        .arg("--rebase")
+        .args(["fetch", "--no-tags", "--single-branch", "--quiet"])
         .status()
         .context("Failed to execute git process")?;
 
-    if !pull_output.success() {
-        eprintln!("\x1b[1;33mWarning:\x1b[0m Failed to sync repository.",);
-        print!("Do you wish to continue? [y/N]: ");
+    if !fetch_output.success() {
+        eprintln!("\x1b[1;33mWarning:\x1b[0m Failed to sync repository.");
 
-        let mut answer = String::new();
+        let should_continue = Confirm::new("Do you wish to continue?")
+            .with_default(false)
+            .prompt_skippable()?;
 
-        io::stdout().flush()?;
-        io::stdin().read_line(&mut answer)?;
+        match should_continue {
+            Some(true) => return Ok(()),
+            _ => bail!("Operation aborted by user due to git pull failure"),
+        }
+    }
 
-        let answer = answer.trim().to_lowercase();
+    // Check if local HEAD matches the remote upstream branch
+    let behind_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .args(["rev-list", "--count", "HEAD..@{upstream}"])
+        .output()
+        .context("Failed to check upstream commits")?;
 
-        match answer.as_str() {
-            "yes" | "y" => return Ok(()),
+    if behind_output.status.success() {
+        let count = String::from_utf8_lossy(&behind_output.stdout);
+        if count.trim() == "0" {
+            return Ok(()); // Branch is fully up-to-date
+        }
+    }
+    // Rebase locally only if there are actual upstream changes
+    let rebase_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("rebase")
+        .arg("--autostash")
+        .status()
+        .context("Failed to execute git process")?;
+
+    if !rebase_output.success() {
+        eprintln!("\x1b[1;33mWarning:\x1b[0m Failed to sync repository.");
+
+        let should_continue = Confirm::new("Do you wish to continue?")
+            .with_default(false)
+            .prompt_skippable()?;
+
+        match should_continue {
+            Some(true) => return Ok(()),
             _ => bail!("Operation aborted by user due to git pull failure"),
         }
     }
@@ -94,83 +134,115 @@ fn git_pull(config: &Config) -> Result<()> {
 }
 
 fn launch_editor(config: &Config) -> Result<()> {
-    let nvim_output = Command::new("nvim")
-        .arg(&config.notes_dir)
-        .output()
-        .context("Failed to execute nvim process")?;
+    let editor_str = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
 
-    if !nvim_output.status.success() {
-        let stderr = String::from_utf8_lossy(&nvim_output.stderr);
-        bail!("{}", stderr.trim());
+    let mut args = shell_words::split(&editor_str)
+        .with_context(|| format!("Failed to parse $EDITOR command string: '{}'", editor_str))?;
+
+    if args.is_empty() {
+        bail!("$EDITOR environment variable was empty");
     }
+
+    let program = args.remove(0);
+
+    let status = Command::new(&program)
+        .args(&args)
+        .arg(&config.notes_dir)
+        .status()
+        .with_context(|| format!("Failed to execute editor command: {}", program))?;
+
+    if !status.success() {
+        bail!(
+            "Editor process ('{}') exited with status: {}",
+            program,
+            status
+        );
+    }
+
     Ok(())
 }
 
-fn commit_message_prompt() -> Result<String> {
-    print!("Commit message [press Enter for default, Esc to cancel sync]: ");
-    io::stdout().flush().context("Failed to flush stdout")?;
+fn get_commit_message() -> Result<String> {
+    let message = Text::new("Commit message:")
+        .with_default("sync: update notes")
+        .with_help_message("Esc to cancel")
+        .prompt_skippable()?; // Esc key yields Ok(None)
 
-    let mut input = String::new();
-
-    loop {
-        if let Event::Key(key_event) = event::read().context("Failed to read terminal event")? {
-            if key_event.kind != KeyEventKind::Press {
-                continue;
-            }
-
-            match key_event.code {
-                KeyCode::Esc => {
-                    println!();
-                    bail!("Sync cancelled by user");
-                }
-
-                KeyCode::Enter => {
-                    println!();
-                    let trimmed = input.trim();
-                    if trimmed.is_empty() {
-                        return Ok("sync: update notes".to_string());
-                    } else {
-                        return Ok(trimmed.to_string());
-                    }
-                }
-
-                KeyCode::Backspace => {
-                    if input.pop().is_some() {
-                        print!("\x08 \x08");
-                        io::stdout().flush()?;
-                    }
-                }
-
-                KeyCode::Char(c) => {
-                    input.push(c);
-                    print!("{c}");
-                    io::stdout().flush()?;
-                }
-
-                _ => {}
-            }
-        }
+    match message {
+        Some(msg) => Ok(msg),
+        None => bail!("Sync cancelled by user"),
     }
 }
 
-fn git_commit_push(config: &Config, message: &str) -> Result<()> {
+fn confirm_push() -> Result<bool> {
+    let confirmed = Confirm::new("Push changes to remote repository?")
+        .with_default(true)
+        .prompt()?;
+
+    Ok(confirmed)
+}
+
+fn git_sync(config: &Config, message: &str) -> Result<()> {
+    // Check if there are any changes
+    let status_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .context("Failed to check git status")?;
+
+    if status_output.stdout.is_empty() {
+        println!("No changes detected. Skipping commit and push.");
+        return Ok(());
+    }
+
+    let add_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("add")
+        .arg("-A")
+        .output()
+        .context("Failed to execute git process")?;
+
+    if !add_output.status.success() {
+        let stderr = String::from_utf8_lossy(&add_output.stderr);
+        let stdout = String::from_utf8_lossy(&add_output.stdout);
+        let err_msg = if !stderr.trim().is_empty() {
+            stderr
+        } else {
+            stdout
+        };
+
+        bail!("Failed to stage files: {}", err_msg.trim());
+    }
+
     let commit_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
         .arg("commit")
         .arg("-m")
-        .arg(format!("'{}'", message))
+        .arg(&message)
         .output()
         .context("Failed to execute git process")?;
 
     if !commit_output.status.success() {
         let stderr = String::from_utf8_lossy(&commit_output.stderr);
+        let stdout = String::from_utf8_lossy(&commit_output.stdout);
+
+        let error_msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "Unknown Git error (both stdout and stderr were empty)".to_string()
+        };
+
         bail!(
             "Failed to commit changes: {}\n\x1b[1;33mWarning:\x1b[0m Remote not synced.",
-            stderr.trim()
+            error_msg
         );
     }
-
     match check_remote_encryption(&config) {
         Ok(false) => {
             bail!("Failed to push changes to remote(s): One or more remotes are not encrypted.")
@@ -217,37 +289,48 @@ fn check_remote_encryption(config: &Config) -> Result<bool> {
 }
 
 fn setup(config: &mut Config, path: &Path) -> Result<()> {
-    print!("Notes directory [~/Notes]: ");
-    let mut input = String::new();
+    let git_path = format!("{}/.git", config.notes_dir);
+    if Path::new(&git_path).is_dir() {
+        println!("Already set up at {}. Skipping.", &config.notes_dir);
+        return Ok(());
+    }
 
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut input)?;
-
-    let raw_path = match input.trim() {
-        "" => "~/Notes",
-        path => path,
+    let raw_path = match Text::new("Notes directory:")
+        .with_default("~/Notes")
+        .with_help_message("Esc to cancel setup")
+        .prompt_skippable()?
+    {
+        Some(s) => s,
+        None => bail!("Setup cancelled by user"),
     };
 
-    config.notes_dir = shellexpand::tilde(raw_path).into_owned();
+    config.notes_dir = shellexpand::tilde(&raw_path).into_owned();
 
-    print!("Git branch [main]: ");
-    let mut input = String::new();
-
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut input)?;
-
-    let branch = match input.trim() {
-        "" => "main",
-        s => s,
+    let branch = match Text::new("Git branch:")
+        .with_default("main")
+        .with_help_message("Esc to cancel setup")
+        .prompt_skippable()?
+    {
+        Some(s) => s,
+        None => bail!("Setup cancelled by user"),
     };
 
-    print!("Git remote: ");
-    let mut input = String::new();
-
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut input)?;
-
-    let remote = input.trim();
+    let remote = match Text::new("Git remote:")
+        .with_help_message("Required. Press Esc to cancel setup.")
+        .with_validator(|input: &str| {
+            if input.trim().is_empty() {
+                Ok(Validation::Invalid(
+                    "Git remote URL cannot be empty.".into(),
+                ))
+            } else {
+                Ok(Validation::Valid)
+            }
+        })
+        .prompt_skippable()?
+    {
+        Some(input) => input.trim().to_string(),
+        None => bail!("Setup cancelled by user"),
+    };
 
     let cryptremote = format!("gcrypt::{}", remote);
 
@@ -310,7 +393,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
         bail!("Failed to change branch: {}", stderr.trim());
     }
 
-    println!("Pushing initial commit. Please authenticate below:");
+    println!("Pushing initial commit. Authentication may be required.");
     // Initial push
     let push_output = Command::new("git")
         .arg("-C")
