@@ -26,6 +26,10 @@ struct Args {
 enum Commands {
     /// Initialize the encrypted notes repository
     Setup,
+    /// Sync local repository without opening the editor
+    Pull,
+    /// Sync remote with local changes without opening the editor
+    Push,
 }
 
 fn main() {
@@ -48,11 +52,39 @@ fn run(args: Args) -> Result<()> {
             setup(&mut config, &config_file_path)?;
             return Ok(());
         }
+        Some(Commands::Pull) => {
+            println!("Syncing notes repository...");
+            git_pull(&config)?;
+            return Ok(());
+        }
+        Some(Commands::Push) => {
+            // Check if there are any changes
+            let status_output = Command::new("git")
+                .arg("-C")
+                .arg(&config.notes_dir)
+                .arg("status")
+                .arg("--porcelain")
+                .output()
+                .context("Failed to check git status")?;
+
+            if status_output.stdout.is_empty() {
+                println!("No changes detected. Skipping commit and push.");
+                return Ok(());
+            }
+
+            let message = get_commit_message(&config)?;
+
+            let push_confirmed = confirm_push()?;
+
+            if push_confirmed {
+                git_sync(&config, &message)?;
+            } else {
+                bail!("Push cancelled by user");
+            }
+
+            return Ok(());
+        }
         _ => {}
-    }
-    let git_path = Path::new(&config.notes_dir).join(".git");
-    if !git_path.is_dir() {
-        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
     }
 
     println!("Syncing notes repository...");
@@ -60,7 +92,21 @@ fn run(args: Args) -> Result<()> {
 
     launch_editor(&config)?;
 
-    let message = get_commit_message()?;
+    // Check if there are any changes
+    let status_output = Command::new("git")
+        .arg("-C")
+        .arg(&config.notes_dir)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .context("Failed to check git status")?;
+
+    if status_output.stdout.is_empty() {
+        println!("No changes detected. Skipping commit and push.");
+        return Ok(());
+    }
+
+    let message = get_commit_message(&config)?;
 
     let push_confirmed = confirm_push()?;
 
@@ -74,10 +120,15 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn git_pull(config: &Config) -> Result<()> {
+    let git_path = Path::new(&config.notes_dir).join(".git");
+    if !git_path.is_dir() {
+        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
+    }
+
     let fetch_output = Command::new("git")
         .arg("-C")
         .arg(&config.notes_dir)
-        .args(["fetch", "--no-tags", "--single-branch", "--quiet"])
+        .args(["fetch", "--no-tags", "--quiet"])
         .status()
         .context("Failed to execute git process")?;
 
@@ -162,7 +213,12 @@ fn launch_editor(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn get_commit_message() -> Result<String> {
+fn get_commit_message(config: &Config) -> Result<String> {
+    let git_path = Path::new(&config.notes_dir).join(".git");
+    if !git_path.is_dir() {
+        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
+    }
+
     let message = Text::new("Commit message:")
         .with_default("sync: update notes")
         .with_help_message("Esc to cancel")
@@ -183,18 +239,9 @@ fn confirm_push() -> Result<bool> {
 }
 
 fn git_sync(config: &Config, message: &str) -> Result<()> {
-    // Check if there are any changes
-    let status_output = Command::new("git")
-        .arg("-C")
-        .arg(&config.notes_dir)
-        .arg("status")
-        .arg("--porcelain")
-        .output()
-        .context("Failed to check git status")?;
-
-    if status_output.stdout.is_empty() {
-        println!("No changes detected. Skipping commit and push.");
-        return Ok(());
+    let git_path = Path::new(&config.notes_dir).join(".git");
+    if !git_path.is_dir() {
+        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
     }
 
     let add_output = Command::new("git")
