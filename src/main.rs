@@ -7,6 +7,8 @@ use inquire::{Confirm, Text};
 use std::path::Path;
 use std::process::Command;
 
+// TODO: description in readme saying that this is for editing the vault from another editor than
+// obsidian. if using obsidian client, use obsidian-git plugin
 // TODO: create or import gpg key in setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
 
