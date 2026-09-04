@@ -6,13 +6,13 @@ use std::path::Path;
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub notes_dir: String,
+    pub vault_dir: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            notes_dir: shellexpand::tilde("~/Notes").to_string(),
+            vault_dir: String::new(),
         }
     }
 }

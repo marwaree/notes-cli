@@ -343,7 +343,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "notes-cli"
+name = "ogit"
 version = "0.1.0"
 dependencies = [
  "anyhow",

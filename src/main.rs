@@ -9,9 +9,8 @@ use std::process::Command;
 
 // TODO: create or import gpg key in setup
 // TODO: set up git-remote-gcrypt and gpg keys or import in setup
-// TODO: add note tags, search by tag
 
-/// Simple cli utility to sync notes from an encrypted git remote.
+/// Simple cli wrapper to sync and edit an obsidian vault from an encrypted git remote.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -21,7 +20,7 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Initialize the encrypted notes repository
+    /// Initialize the encrypted vault repository
     Setup,
     /// Sync local repository without opening the editor
     Pull,
@@ -41,7 +40,7 @@ fn main() {
 fn run(args: Args) -> Result<()> {
     let os_config_dir =
         dirs::config_dir().context("Cannot find config directory on this system")?;
-    let config_file_path = os_config_dir.join("notes-cli").join("config.toml");
+    let config_file_path = os_config_dir.join("ogit").join("config.toml");
     let mut config = Config::load_or_create(&config_file_path)?;
 
     match args.command {
@@ -50,7 +49,7 @@ fn run(args: Args) -> Result<()> {
             return Ok(());
         }
         Some(Commands::Pull) => {
-            println!("Syncing notes repository...");
+            println!("Syncing vault repository...");
             git_pull(&config)?;
             return Ok(());
         }
@@ -58,7 +57,7 @@ fn run(args: Args) -> Result<()> {
             // Check if there are any changes
             let status_output = Command::new("git")
                 .arg("-C")
-                .arg(&config.notes_dir)
+                .arg(&config.vault_dir)
                 .arg("status")
                 .arg("--porcelain")
                 .output()
@@ -84,7 +83,7 @@ fn run(args: Args) -> Result<()> {
         _ => {}
     }
 
-    println!("Syncing notes repository...");
+    println!("Syncing vault repository...");
     git_pull(&config)?;
 
     launch_editor(&config)?;
@@ -92,7 +91,7 @@ fn run(args: Args) -> Result<()> {
     // Check if there are any changes
     let status_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("status")
         .arg("--porcelain")
         .output()
@@ -117,14 +116,14 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn git_pull(config: &Config) -> Result<()> {
-    let git_path = Path::new(&config.notes_dir).join(".git");
+    let git_path = Path::new(&config.vault_dir).join(".git");
     if !git_path.is_dir() {
-        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
+        bail!("Vault git repository doesn't exist. Try `ogit setup` to create it.")
     }
 
     let fetch_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .args(["fetch", "--no-tags", "--quiet"])
         .status()
         .context("Failed to execute git process")?;
@@ -145,7 +144,7 @@ fn git_pull(config: &Config) -> Result<()> {
     // Check if local HEAD matches the remote upstream branch
     let behind_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .args(["rev-list", "--count", "HEAD..@{upstream}"])
         .output()
         .context("Failed to check upstream commits")?;
@@ -159,7 +158,7 @@ fn git_pull(config: &Config) -> Result<()> {
     // Rebase locally only if there are actual upstream changes
     let rebase_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("rebase")
         .arg("--autostash")
         .status()
@@ -195,7 +194,7 @@ fn launch_editor(config: &Config) -> Result<()> {
 
     let status = Command::new(&program)
         .args(&args)
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .status()
         .with_context(|| format!("Failed to execute editor command: {}", program))?;
 
@@ -211,9 +210,9 @@ fn launch_editor(config: &Config) -> Result<()> {
 }
 
 fn get_commit_message(config: &Config) -> Result<String> {
-    let git_path = Path::new(&config.notes_dir).join(".git");
+    let git_path = Path::new(&config.vault_dir).join(".git");
     if !git_path.is_dir() {
-        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
+        bail!("Vault git repository doesn't exist. Try `ogit setup` to create it.")
     }
 
     let message = Text::new("Commit message:")
@@ -236,14 +235,14 @@ fn confirm_push() -> Result<bool> {
 }
 
 fn git_sync(config: &Config, message: &str) -> Result<()> {
-    let git_path = Path::new(&config.notes_dir).join(".git");
+    let git_path = Path::new(&config.vault_dir).join(".git");
     if !git_path.is_dir() {
-        bail!("Notes git repository doesn't exist. Try `notes-cli setup` to create it.")
+        bail!("Vault git repository doesn't exist. Try `ogit setup` to create it.")
     }
 
     let add_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("add")
         .arg("-A")
         .output()
@@ -263,7 +262,7 @@ fn git_sync(config: &Config, message: &str) -> Result<()> {
 
     let commit_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("commit")
         .arg("-m")
         .arg(&message)
@@ -299,7 +298,7 @@ fn git_sync(config: &Config, message: &str) -> Result<()> {
 
     let push_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("push")
         .status()
         .context("Failed to execute git process")?;
@@ -314,7 +313,7 @@ fn git_sync(config: &Config, message: &str) -> Result<()> {
 fn check_remote_encryption(config: &Config) -> Result<bool> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .args(["remote", "-v"])
         .output()?;
 
@@ -333,14 +332,14 @@ fn check_remote_encryption(config: &Config) -> Result<bool> {
 }
 
 fn setup(config: &mut Config, path: &Path) -> Result<()> {
-    let git_path = format!("{}/.git", config.notes_dir);
+    let git_path = format!("{}/.git", config.vault_dir);
     if Path::new(&git_path).is_dir() {
-        println!("Already set up at {}. Skipping.", &config.notes_dir);
+        println!("Already set up at {}. Skipping.", &config.vault_dir);
         return Ok(());
     }
 
-    let raw_path = match Text::new("Notes directory:")
-        .with_default("~/Notes")
+    let raw_path = match Text::new("Vault directory:")
+        .with_default("~/Obsidian")
         .with_help_message("Esc to cancel setup")
         .prompt_skippable()?
     {
@@ -348,7 +347,21 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
         None => bail!("Setup cancelled by user"),
     };
 
-    config.notes_dir = shellexpand::tilde(&raw_path).into_owned();
+    let vault_dir = shellexpand::tilde(&raw_path).into_owned();
+
+    if !Path::new(&vault_dir).is_dir() {
+        bail!("Directory not found. Select an existing obsidian vault or create one.")
+    }
+
+    let obsidian_path = format!("{}/.obsidian", vault_dir);
+
+    if !Path::new(&obsidian_path).is_dir() {
+        bail!(
+            "Directory is not an obsidian vault. Select an existing obsidian vault or create one."
+        )
+    }
+
+    config.vault_dir = vault_dir;
 
     let branch = match Text::new("Git branch:")
         .with_default("main")
@@ -380,7 +393,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
 
     let init_output = Command::new("git")
         .arg("init")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .output()
         .context("Failed to execute git process")?;
 
@@ -391,7 +404,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
 
     let remote_add_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("remote")
         .arg("add")
         .arg("cryptremote")
@@ -407,7 +420,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
     // Initial commit
     let commit_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("commit")
         .arg("--allow-empty")
         .arg("-m")
@@ -425,7 +438,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
 
     let branch_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("branch")
         .arg("-M")
         .arg(&branch)
@@ -441,7 +454,7 @@ fn setup(config: &mut Config, path: &Path) -> Result<()> {
     // Initial push
     let push_output = Command::new("git")
         .arg("-C")
-        .arg(&config.notes_dir)
+        .arg(&config.vault_dir)
         .arg("push")
         .arg("-u")
         .arg("cryptremote")

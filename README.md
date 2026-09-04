@@ -1,6 +1,6 @@
-# notes-cli
+# obsidian-git-cli
 
-## Simple cli utility to sync notes from an encrypted git remote
+## Simple cli wrapper to sync and edit an obsidian vault from an encrypted git remote
 
 ### Requirements
 
@@ -13,27 +13,27 @@ yay -S git-remote-gcrypt
 Setup encrypted git repository:
 
 ```sh
-notes-cli setup
+ogit setup
 ```
 
 Pull latest changes and edit local directory with default editor.
 This will ask you for a commit message and push on exit:
 
 ```sh
-notes-cli
+ogit
 ```
 
 Pull latest changes without opening the editor:
 
 ```sh
-notes-cli pull
+ogit pull
 ```
 
 Push changes without opening the editor.
 This will ask you for a commit message:
 
 ```sh
-notes-cli push
+ogit push
 ```
 
 ### Configuration
